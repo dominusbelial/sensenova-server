@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template LaunchAgent. Replace /Users/YOU with your home directory (launchd does not expand ~),
+     copy to ~/Library/LaunchAgents/local.sensenova-server.plist, then:
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.sensenova-server.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.sensenova-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/Development/sensenova-server/.build/release/sensenova-server</string>
+    <string>--host</string><string>0.0.0.0</string>
+    <string>--port</string><string>8003</string>
+    <string>--weights</string><string>/Users/YOU/sensenova/SenseNova-U1.5-8B-MoT-8step-v2-8bit</string>
+    <string>--api-key-file</string><string>/Users/YOU/.sensenova/api-key</string>
+    <string>--idle-unload-minutes</string><string>30</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/YOU/Development/sensenova-server</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/sensenova-server.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/sensenova-server.err.log</string>
+</dict>
+</plist>

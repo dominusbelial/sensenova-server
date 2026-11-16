@@ -1,0 +1,7 @@
+.build/
+.scratch/
+*.npy
+.swiftpm/
+
+__pycache__/
+proof/
