@@ -107,6 +107,20 @@ To run the acceptance checks after starting the server, put its exact PID in `pr
 
 With the default 8-step v2 int8 artifact: warm VQA **18.59 s** for 508 output tokens; streaming **3.54 s** to first content / **19.44 s** total. Repeated standalone VQA varied up to **96.28 s** while other models shared the machine. First 1024x1024 generation with resident weights took **21.51 s**; editing took **23.72 s** (8 steps, cfg 1). Steady model allocations were about **18.51 GiB**; the server's observed physical-footprint peak was **20.440 GiB** with the 1 GiB allocation cache cap. These measurements are fixture-specific. Without the allocation-cache cap the process footprint reached about 50.8 GiB, which is why the server sets one.
 
+## Similar projects
+
+Checked in November 2026 from each project's own README or package page; features change, so check the current docs.
+
+| Project | Runtime | Model | Image Q&A / chat | Generate | Edit | API |
+|---|---|---|---|---|---|---|
+| **sensenova-server** (this) | Swift, MLX, Network.framework | SenseNova U1.5 8B (8-step tier by default), one resident model | yes | yes | yes | `/v1/chat/completions`, `/v1/images/generations`, `/v1/images/edits` |
+| [sensenova-mlx](https://github.com/Ericdaany0312/sensenova-mlx) | Python, MLX | SenseNova U1.5 8B, optional 8-step LoRA | no | yes | no (not in 0.2.0) | `/v1/images/generations` |
+| [SenseNova-U1 deployment](https://github.com/OpenSenseNova/SenseNova-U1/blob/main/docs/deployment.md) (LightLLM) and [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/sensenova_u1/) | Python, CUDA GPU servers | SenseNova U1 / U1.5 | model supports it | model supports it | model supports it | OpenAI-compatible (see their docs for routes); the official FAQ lists MLX as unsupported |
+| [mlx-openai-server](https://github.com/cubist38/mlx-openai-server), [vMLX](https://pypi.org/project/vmlx/), [Rapid-MLX](https://ai-tldr.dev/tools/rapid-mlx/), [mlx-lm-server](https://github.com/Ar9av/mlx-lm-server) | Python (mlx-lm-server: Rust + Python), MLX | general: a vision model (Qwen-VL, Gemma, …) plus a separate image model (FLUX, Z-Image, …) | yes | yes | some | OpenAI-compatible, multi-model |
+| [mlx-serve](https://github.com/raspoli/mlx-serve), [mlx-router](https://github.com/henrybravo/mlx-router) | Python, MLX | general vision/language models | yes | no | no | OpenAI-compatible |
+
+What sets this package apart: a native Swift server (no Python at runtime), and a single unified SenseNova model that both looks at images and draws them, so one resident ~20 GB model replaces a separate vision model and image generator. It builds on the upstream [sensenova-u1-swift](https://github.com/xocialize/sensenova-u1-swift) port. Pick a general MLX server instead if you want to switch between many models, or the official CUDA deployment for NVIDIA hardware.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). The upstream library is MIT; the SenseNova model weights have their own license (Apache-2.0 for the U1.5 releases).
