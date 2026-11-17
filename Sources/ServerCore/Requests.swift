@@ -77,7 +77,7 @@ public struct ChatRequest {
         }
         guard parsed.last?.role == "user", imageCount <= 4 else { throw APIError("End with a user message; at most four images per request") }
         messages = parsed
-        maxTokens = try integer(obj["max_tokens"], default: 512, range: 1...4096, name: "max_tokens")
+        maxTokens = try integer(obj["max_tokens"], default: 1536, range: 1...4096, name: "max_tokens")
         temperature = try number(obj["temperature"], default: 0, range: 0...2, name: "temperature")
         topP = try number(obj["top_p"], default: 1, range: 0.001...1, name: "top_p")
         if let value = obj["stream"] {

@@ -63,13 +63,13 @@ uri = 'data:image/png;base64,' + base64.b64encode(Path.home().joinpath('sensenov
 print(json.dumps({'messages': [{'role': 'user', 'content': [
     {'type': 'image_url', 'image_url': {'url': uri}},
     {'type': 'text', 'text': 'Describe this screenshot.'}
-]}], 'max_tokens': 512, 'temperature': 0, 'stream': True}))
+]}], 'max_tokens': 1536, 'temperature': 0, 'stream': True}))
 PY
 auth_curl -N http://127.0.0.1:8003/v1/chat/completions \
   -H 'Content-Type: application/json' --data-binary @/tmp/vision.json
 ```
 
-SSE emits role, incremental content, final finish reason/usage, then `data: [DONE]`. Partial UTF-8 tokens are held until valid text is available. `stream:false` returns the complete answer with `choices[0].message.content`, `finish_reason` and token usage. Prompt usage includes ChatML and expanded image tokens; completion usage excludes the stop token, which the library does not return. `max_tokens` is 1–4096 (default 512), `temperature` 0–2 (default 0 / greedy), `top_p` 0.001–1 (default 1). Unknown fields, including `chat_template_kwargs`, `reasoning_effort`, `extra_body` and `model`, are ignored. The selected resident artifact always determines the model.
+SSE emits role, incremental content, final finish reason/usage, then `data: [DONE]`. Partial UTF-8 tokens are held until valid text is available. `stream:false` returns the complete answer with `choices[0].message.content`, `finish_reason` and token usage. Prompt usage includes ChatML and expanded image tokens; completion usage excludes the stop token, which the library does not return. `max_tokens` is 1–4096 (default 1536), `temperature` 0–2 (default 0 / greedy), `top_p` 0.001–1 (default 1). Unknown fields, including `chat_template_kwargs`, `reasoning_effort`, `extra_body` and `model`, are ignored. The selected resident artifact always determines the model.
 
 ```sh
 auth_curl -s http://127.0.0.1:8003/v1/images/generations \
