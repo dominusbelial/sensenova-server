@@ -91,6 +91,10 @@ auth_curl -s http://127.0.0.1:8003/v1/images/edits \
 
 Both image routes return `{"created": UNIX_SECONDS, "data":[{"b64_json":"PNG_BASE64"}]}`. Only `n:1` and `response_format:b64_json` are supported. Size defaults to 1024x1024, including edits. The library supports a factor-32 grid: accepted sizes are multiples of 32, 256–2048 pixels per side, aspect ratio at most 4. Steps are 1–100; cfg 1–10; seed is a nonnegative signed 64-bit integer (default 42). The fast tier's intended recipe is 8 steps / cfg 1; overriding it does not turn it into the base quality tier. PNG encoding uses upstream's native Swift/ImageIO encoder, with rounded/clamped `x*0.5+0.5` RGB conversion.
 
+## Log format
+
+Every server log line begins with local ISO-8601 time, milliseconds and UTC offset. A job line keeps `Job finished in <seconds>s; type=...`, its `ok`/`error` status, existing token or image details and MLX memory figures. It also includes `id`, `queued_s` (acceptance to worker start), `run_s` (execution duration), `queue_depth` (jobs already waiting at acceptance), and `load_s` when the job reloads the model. Durations are in seconds. Rejected requests log `status`, `route` and `reason` without request content. When a disconnect is detected before the response, `client_gone` identifies the accepted job; `job_will_run=true` means the queue still executes it. Disconnect detection depends on the connection reporting closure.
+
 ## Scope and operations
 
 - Chat supports ordered system, user and assistant history, plus up to four images across user turns. It ends with a user turn and is recomputed each request; there is no server-side conversation or KV session. No tools/functions, audio, image URLs over HTTP(S), or thinking-mode switch. A closed think block selects the same immediate-answer path as the CLI.

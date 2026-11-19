@@ -59,6 +59,35 @@ final class ServerCoreTests: XCTestCase {
         try Auth.check("Bearer " + key, key: key)
         for header in [nil, "Basic x", "Bearer " + key.dropLast(), "Bearer " + key + "x", "Bearer " + String(repeating: "x", count: key.count)] { status(401) { try Auth.check(header, key: key) } }
     }
+    func testLogTimestampWithMillisecondsAndOffset() {
+        let line = ServerLog.line("ready", at: Date(timeIntervalSince1970: 0.123), timeZone: TimeZone(secondsFromGMT: -5 * 3600)!)
+        XCTAssertEqual(line, "1969-12-31T19:00:00.123-05:00 ready")
+    }
+    func testQueuedFakeJobTimingAndFields() throws {
+        let queue = JobQueue()
+        let entered = expectation(description: "first job entered")
+        let completed = expectation(description: "second job completed")
+        let thirdCompleted = expectation(description: "third job completed")
+        let release = DispatchSemaphore(value: 0)
+        try queue.submit(id: "first") { _ in entered.fulfill(); release.wait() }
+        wait(for: [entered], timeout: 5)
+        try queue.submit(id: "second") { timing in
+            XCTAssertEqual(timing.id, "second")
+            XCTAssertEqual(timing.queueDepth, 0)
+            XCTAssertGreaterThanOrEqual(timing.queuedSeconds, 0.04)
+            let fields = timing.fields(runSeconds: 0.25, loadSeconds: 0.1)
+            XCTAssertTrue(fields.contains("id=second queued_s="))
+            XCTAssertTrue(fields.contains("run_s=0.25 queue_depth=0 load_s=0.1"))
+            completed.fulfill()
+        }
+        try queue.submit(id: "third") { timing in
+            XCTAssertEqual(timing.queueDepth, 1)
+            thirdCompleted.fulfill()
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+        release.signal()
+        wait(for: [completed, thirdCompleted], timeout: 5)
+    }
     func testQueueOverflow429AndRelease() throws {
         let queue = JobQueue()
         for _ in 0..<9 { try queue.reserve() }

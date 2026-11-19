@@ -62,8 +62,8 @@ public final class HTTPServer {
             client.start()
         }
         listener.stateUpdateHandler = { state in
-            if case .ready = state { print("Listening on \(self.config.host):\(self.config.port)") }
-            if case .failed(let error) = state { fputs("Listener failed: \(error)\n", stderr); exit(1) }
+            if case .ready = state { ServerLog.write("Listening on \(self.config.host):\(self.config.port)") }
+            if case .failed(let error) = state { ServerLog.write("Listener failed: \(error)"); exit(1) }
         }
         listener.start(queue: network)
     }
@@ -86,7 +86,7 @@ public final class HTTPServer {
                 client.respond(["object": "list", "data": [["id": config.modelID, "object": "model", "created": 0, "owned_by": "local"]]]); return
             }
             guard request.method == "POST" else { throw APIError(404, "Route not found") }
-            let work: () throws -> Void
+            let work: (JobTiming) throws -> Void
             switch request.path {
             case "/v1/chat/completions":
                 try requireJSON(request)
@@ -94,7 +94,7 @@ public final class HTTPServer {
                 let id = "chatcmpl-" + UUID().uuidString
                 let created = Int(Date().timeIntervalSince1970)
                 if chat.stream {
-                    work = {
+                    work = { timing in
                         client.beginSSE()
                         func chunk(_ delta: [String: Any], finish: Any = NSNull(), usage: Any? = nil) {
                             var value: [String: Any] = ["id": id, "object": "chat.completion.chunk", "created": created, "model": self.config.modelID,
@@ -104,14 +104,14 @@ public final class HTTPServer {
                         }
                         chunk(["role": "assistant"])
                         do {
-                            let result = try self.engine.chat(chat) { chunk(["content": $0]) }
+                            let result = try self.engine.chat(chat, timing: timing) { chunk(["content": $0]) }
                             chunk([:], finish: result["finish_reason"]!, usage: result["usage"])
                         } catch { client.event((error as? APIError ?? APIError(500, "Inference failed")).json) }
                         client.endSSE()
                     }
                 } else {
-                    work = {
-                        let result = try self.engine.chat(chat)
+                    work = { timing in
+                        let result = try self.engine.chat(chat, timing: timing)
                         client.respond(["id": id, "object": "chat.completion", "created": created, "model": self.config.modelID,
                             "choices": [["index": 0, "message": ["role": "assistant", "content": result["content"]!], "finish_reason": result["finish_reason"]!]], "usage": result["usage"]!])
                     }
@@ -119,22 +119,24 @@ public final class HTTPServer {
             case "/v1/images/generations":
                 try requireJSON(request)
                 let image = try ImageRequest(data: body, quality: config.quality)
-                work = { client.respond(try self.engine.image(image)) }
+                work = { timing in client.respond(try self.engine.image(image, timing: timing)) }
             case "/v1/images/edits":
                 let form = try Multipart(data: body, contentType: request.headers["content-type"] ?? "")
                 let image = try ImageRequest(fields: form.fields, image: form.image, quality: config.quality)
-                work = { client.respond(try self.engine.image(image)) }
+                work = { timing in client.respond(try self.engine.image(image, timing: timing)) }
             default: throw APIError(404, "Route not found")
             }
-            try jobs.submit {
+            let jobID = String(UUID().uuidString.prefix(8)).lowercased()
+            try jobs.submit(id: jobID, accepted: { client.accept(jobID) }) { timing in
                 autoreleasepool {
-                    do { try work() }
+                    defer { client.jobFinished() }
+                    do { try work(timing) }
                     catch let error as APIError { client.respond(error.json, status: error.status) }
-                    catch { fputs("Inference error: \(error)\n", stderr); client.respond(APIError(500, "Inference failed").json, status: 500) }
+                    catch { ServerLog.write("Inference error: \(error)"); client.respond(APIError(500, "Inference failed").json, status: 500) }
                 }
             }
-        } catch let error as APIError { client.respond(error.json, status: error.status) }
-        catch { client.respond(APIError(400, "Invalid request").json, status: 400) }
+        } catch let error as APIError { client.reject(error, route: request.path) }
+        catch { client.reject(APIError(400, "Invalid request"), route: request.path) }
     }
     private func requireJSON(_ request: HTTPRequest) throws {
         guard request.headers["content-type"]?.split(separator: ";").first?.lowercased() == "application/json" else { throw APIError(415, "Expected application/json") }
@@ -150,16 +152,37 @@ private final class Client {
     private var buffer = Data()
     private var request: HTTPRequest?
     private var timeout: DispatchWorkItem?
+    private let stateLock = NSLock()
+    private var jobID: String?
+    private var disconnected = false
+    private var finished = false
+    private var responding = false
+    private var goneLogged = false
+    private func logGoneIfNeeded() {
+        if disconnected, !finished, !responding, !goneLogged, let jobID {
+            goneLogged = true
+            ServerLog.write("client_gone id=\(jobID) job_will_run=true")
+        }
+    }
+    func accept(_ id: String) { stateLock.lock(); jobID = id; logGoneIfNeeded(); stateLock.unlock() }
+    func jobFinished() { stateLock.lock(); finished = true; stateLock.unlock() }
+    private func clientGone() { stateLock.lock(); disconnected = true; logGoneIfNeeded(); stateLock.unlock() }
+    func reject(_ error: APIError, route: String?) {
+        let known = ["/health", "/v1/models", "/v1/chat/completions", "/v1/images/generations", "/v1/images/edits"]
+        let safeRoute = route.flatMap { known.contains($0) ? $0 : nil } ?? "unknown"
+        ServerLog.write("Request rejected status=\(error.status) route=\(safeRoute) reason=\(error.message)")
+        respond(error.json, status: error.status)
+    }
     init(connection: NWConnection, key: String, network: DispatchQueue, route: @escaping (HTTPRequest, Data, Client) -> Void, closed: @escaping () -> Void) {
         self.connection = connection; self.key = key; self.network = network; self.route = route; self.closed = closed
     }
     func start() {
         connection.stateUpdateHandler = { [weak self] state in
             if case .cancelled = state { self?.closed() }
-            if case .failed = state { self?.connection.cancel() }
+            if case .failed = state { self?.clientGone(); self?.connection.cancel() }
         }
         connection.start(queue: receiveQueue)
-        let timeout = DispatchWorkItem { [weak self] in self?.respond(APIError(408, "Request upload timed out").json, status: 408) }
+        let timeout = DispatchWorkItem { [weak self] in self?.reject(APIError(408, "Request upload timed out"), route: self?.request?.path) }
         self.timeout = timeout
         receiveQueue.asyncAfter(deadline: .now() + 30, execute: timeout)
         receive()
@@ -172,8 +195,8 @@ private final class Client {
                     if let range = buffer.range(of: Data("\r\n\r\n".utf8)) {
                         guard range.upperBound <= 16384 else { throw APIError(431, "Headers exceed 16 KiB") }
                         let parsed = try HTTPRequest(header: Data(buffer[..<range.lowerBound]))
-                        if parsed.path != "/health" { try Auth.check(parsed.headers["authorization"], key: key) }
                         request = parsed
+                        if parsed.path != "/health" { try Auth.check(parsed.headers["authorization"], key: key) }
                         buffer.removeSubrange(..<range.upperBound)
                         if parsed.headers["expect"]?.lowercased() == "100-continue" { send(Data("HTTP/1.1 100 Continue\r\n\r\n".utf8)) }
                     } else if buffer.count > 16384 { throw APIError(431, "Headers exceed 16 KiB") }
@@ -183,12 +206,20 @@ private final class Client {
                     guard buffer.count == request.length else { throw APIError("Pipelining or excess body bytes are not supported") }
                     let body = buffer; buffer = Data()
                     network.async { self.route(request, body, self) }
+                    monitorDisconnect()
                     return
                 }
                 if complete || error != nil { connection.cancel(); return }
                 receive()
-            } catch let error as APIError { respond(error.json, status: error.status) }
-            catch { respond(APIError(400, "Invalid HTTP request").json, status: 400) }
+            } catch let error as APIError { reject(error, route: request?.path) }
+            catch { reject(APIError(400, "Invalid HTTP request"), route: request?.path) }
+        }
+    }
+    private func monitorDisconnect() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] _, _, complete, error in
+            guard let self else { return }
+            if complete || error != nil { self.clientGone() }
+            else { self.monitorDisconnect() }
         }
     }
     private func send(_ data: Data, final: Bool = false) {
@@ -198,6 +229,7 @@ private final class Client {
     }
     func respond(_ value: Any, status: Int = 200) {
         timeout?.cancel()
+        stateLock.lock(); responding = true; stateLock.unlock()
         let data = jsonData(value)
         let reason = [200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found", 408: "Request Timeout", 411: "Length Required", 413: "Content Too Large", 415: "Unsupported Media Type", 429: "Too Many Requests", 431: "Request Header Fields Too Large", 500: "Internal Server Error", 503: "Service Unavailable"][status] ?? "Error"
         var header = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(data.count)\r\nConnection: close\r\n"
@@ -207,5 +239,5 @@ private final class Client {
     }
     func beginSSE() { send(Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n".utf8)) }
     func event(_ value: Any) { send(Data("data: ".utf8) + jsonData(value) + Data("\n\n".utf8)) }
-    func endSSE() { send(Data("data: [DONE]\n\n".utf8), final: true) }
+    func endSSE() { stateLock.lock(); responding = true; stateLock.unlock(); send(Data("data: [DONE]\n\n".utf8), final: true) }
 }

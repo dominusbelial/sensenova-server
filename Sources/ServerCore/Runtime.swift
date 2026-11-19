@@ -67,6 +67,7 @@ public final class JobQueue: @unchecked Sendable {
     public let worker = DispatchQueue(label: "sensenova.gpu")
     private let lock = NSLock()
     private var outstanding = 0
+    private var waiting = 0
     private var loaded = false
     private var accepting = true
     public init() {}
@@ -76,12 +77,19 @@ public final class JobQueue: @unchecked Sendable {
         guard outstanding < 9 else { throw APIError(429, "GPU queue is full (one active plus eight waiting)") }
         outstanding += 1
     }
-    public func submit(_ work: @escaping () -> Void) throws {
+    public func submit(id: String, accepted: () -> Void = {}, _ work: @escaping (JobTiming) -> Void) throws {
         lock.lock(); defer { lock.unlock() }
         guard accepting else { throw APIError(503, "Server is shutting down") }
         guard outstanding < 9 else { throw APIError(429, "GPU queue is full (one active plus eight waiting)") }
-        outstanding += 1
-        worker.async { defer { self.finish() }; work() }
+        let depth = waiting
+        let acceptedAt = ProcessInfo.processInfo.systemUptime
+        outstanding += 1; waiting += 1
+        accepted()
+        worker.async {
+            self.lock.lock(); self.waiting -= 1; self.lock.unlock()
+            let timing = JobTiming(id: id, queueDepth: depth, queuedSeconds: ProcessInfo.processInfo.systemUptime - acceptedAt)
+            defer { self.finish() }; work(timing)
+        }
     }
     public func drain(_ completion: @escaping () -> Void) {
         lock.lock(); accepting = false
@@ -125,7 +133,7 @@ public final class Engine: @unchecked Sendable {
     public init(config: Configuration, jobs: JobQueue, tokenizer: SenseNovaTokenizer) {
         self.config = config; self.jobs = jobs; self.tokenizer = tokenizer
     }
-    public func load() throws {
+    @discardableResult public func load() throws -> Double? {
         dispatchPrecondition(condition: .onQueue(jobs.worker))
         if model == nil {
             // Bound allocator retention independently of the resident model / live tensors.
@@ -133,26 +141,31 @@ public final class Engine: @unchecked Sendable {
             let start = Date()
             model = try WeightLoading.loadArtifact(from: URL(fileURLWithPath: config.weights))
             jobs.setLoaded(true)
-            print("Model loaded in \(Date().timeIntervalSince(start))s; MLX active \(Memory.activeMemory) bytes")
+            let elapsed = Date().timeIntervalSince(start)
+            ServerLog.write("Model loaded in \(elapsed)s; MLX active \(Memory.activeMemory) bytes")
+            return elapsed
         }
+        return nil
     }
     public func unloadIfIdle() {
         dispatchPrecondition(condition: .onQueue(jobs.worker))
-        if config.idleMinutes > 0 && Date().timeIntervalSince(lastUse) >= config.idleMinutes * 60 {
+        if model != nil && config.idleMinutes > 0 && Date().timeIntervalSince(lastUse) >= config.idleMinutes * 60 {
             model = nil; Memory.clearCache(); jobs.setLoaded(false)
+            ServerLog.write("Model unloaded after idle timeout")
         }
     }
     /// One line per job. `type` is chat (text only), vqa (chat with images), generate or edit;
     /// `ok`/`error` because the line is written from a defer, also when the job throws.
-    private func done(_ start: Date, type: String, detail: String, ok: Bool) {
+    private func done(_ start: TimeInterval, timing: JobTiming, loadSeconds: Double?, type: String, detail: String, ok: Bool) {
         lastUse = Date(); Memory.clearCache()
-        print("Job finished in \(lastUse.timeIntervalSince(start))s; type=\(type) \(ok ? "ok" : "error")\(detail.isEmpty ? "" : " " + detail); MLX active \(Memory.activeMemory), peak \(Memory.peakMemory) bytes")
+        let run = ProcessInfo.processInfo.systemUptime - start
+        ServerLog.write("Job finished in \(run)s; type=\(type) \(ok ? "ok" : "error")\(detail.isEmpty ? "" : " " + detail); MLX active \(Memory.activeMemory), peak \(Memory.peakMemory) bytes \(timing.fields(runSeconds: run, loadSeconds: loadSeconds))")
     }
-    public func chat(_ request: ChatRequest, onContent: ((String) -> Void)? = nil) throws -> [String: Any] {
+    public func chat(_ request: ChatRequest, timing: JobTiming, onContent: ((String) -> Void)? = nil) throws -> [String: Any] {
         dispatchPrecondition(condition: .onQueue(jobs.worker))
-        let start = Date(); var type = "chat", detail = "", ok = false
-        defer { done(start, type: type, detail: detail, ok: ok) }
-        try load()
+        let start = ProcessInfo.processInfo.systemUptime; var type = "chat", detail = "", ok = false; var loadSeconds: Double?
+        defer { done(start, timing: timing, loadSeconds: loadSeconds, type: type, detail: detail, ok: ok) }
+        loadSeconds = try load()
         var prompt = ""; var images: [EditImage] = []
         for message in request.messages {
             let refs = try message.images.map { try SenseNovaImageIO.loadEditImage(data: $0) }
@@ -190,12 +203,12 @@ public final class Engine: @unchecked Sendable {
         detail += " prompt_tokens=\(ids.count) completion_tokens=\(tokens.count)"; ok = true
         return ["content": text, "finish_reason": tokens.count == request.maxTokens ? "length" : "stop", "usage": ["prompt_tokens": ids.count, "completion_tokens": tokens.count, "total_tokens": ids.count + tokens.count]]
     }
-    public func image(_ request: ImageRequest) throws -> [String: Any] {
+    public func image(_ request: ImageRequest, timing: JobTiming) throws -> [String: Any] {
         dispatchPrecondition(condition: .onQueue(jobs.worker))
-        let start = Date(); var ok = false
-        defer { done(start, type: request.image == nil ? "generate" : "edit",
+        let start = ProcessInfo.processInfo.systemUptime; var ok = false; var loadSeconds: Double?
+        defer { done(start, timing: timing, loadSeconds: loadSeconds, type: request.image == nil ? "generate" : "edit",
                      detail: "\(request.width)x\(request.height) steps=\(request.steps) cfg=\(request.cfg)", ok: ok) }
-        try load()
+        loadSeconds = try load()
         var params = T2IParams(); params.numSteps = request.steps; params.cfgScale = request.cfg; params.seed = request.seed
         let result: MLXArray
         if let data = request.image {

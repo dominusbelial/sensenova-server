@@ -24,7 +24,7 @@ import SenseNovaU1
             let signals = [SIGTERM, SIGINT].map { code -> DispatchSourceSignal in
                 let source = DispatchSource.makeSignalSource(signal: code, queue: .global())
                 source.setEventHandler {
-                    print("Shutting down; draining accepted GPU jobs")
+                    ServerLog.write("Shutting down; draining accepted GPU jobs")
                     server.stop()
                     jobs.drain { server.waitForResponsesAndExit() }
                 }
@@ -34,6 +34,6 @@ import SenseNovaU1
                 try await Task.sleep(for: .seconds(3600))
                 withExtendedLifetime((server, timer, signals)) {}
             }
-        } catch { fputs("Startup failed: \(error)\n", stderr); exit(1) }
+        } catch { ServerLog.write("Startup failed: \(error)"); exit(1) }
     }
 }
