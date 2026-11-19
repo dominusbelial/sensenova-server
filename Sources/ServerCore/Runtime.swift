@@ -10,6 +10,8 @@ public struct Configuration: Sendable {
     public var weights = NSHomeDirectory() + "/sensenova/SenseNova-U1.5-8B-MoT-8step-v2-8bit"
     public var keyFile = NSHomeDirectory() + "/.sensenova/api-key"
     public var idleMinutes: Double = 0
+    /// Where requests that produced an empty answer are kept for replay (newest 20).
+    public var emptyCaptureDir = NSHomeDirectory() + "/Library/Logs/sensenova-empty"
     public var quality: Bool { weights.lowercased().contains("bf16") }
     public var modelID: String { quality ? "sensenova-u1.5-bf16" : "sensenova-u1.5-8step" }
     public init(arguments: [String] = Array(CommandLine.arguments.dropFirst()), env: [String: String] = ProcessInfo.processInfo.environment) throws {
@@ -171,6 +173,17 @@ public final class Engine: @unchecked Sendable {
             seen.append(id)
             let text = self.tokenizer.decode(seen)
             if let delta = stream.delta(text) { onContent(delta) }
+        }
+        if tokens.isEmpty {
+            // The first sampled token was <|im_end|>. Returning an empty "ok" makes a client
+            // (Hermes vision) carry on with no description; an error lets it fall back instead.
+            detail += " prompt_tokens=\(ids.count) completion_tokens=0 empty_answer"
+            do {
+                let dir = try EmptyAnswerCapture(directory: config.emptyCaptureDir)
+                    .write(request, promptTokens: ids.count, imageTokens: images.map(\.tokenCount))
+                detail += " capture=\(dir.lastPathComponent)"
+            } catch { detail += " capture_failed" }
+            throw APIError(503, "The model ended its answer before writing anything; retry or use another model")
         }
         let text = tokenizer.decode(tokens)
         if onContent != nil, let delta = stream.delta(text, final: true) { onContent?(delta) }

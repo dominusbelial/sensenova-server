@@ -68,9 +68,13 @@ public struct ChatRequest {
                 for part in parts {
                     if part["type"] as? String == "text", let string = part["text"] as? String { text += try safeText(string) }
                     else if part["type"] as? String == "image_url", role == "user", let image = part["image_url"] as? [String: Any], let url = image["url"] as? String {
-                        images.append(try decodeDataURI(url)); text += "<image>\n"
+                        images.append(try decodeDataURI(url))
                     } else { throw APIError("Invalid content part; images are supported in user messages only") }
                 }
+                // The model's VQA format puts the images before the question (upstream
+                // sensenova-cli: "<image>\n" + prompt). With the question first and greedy
+                // decoding, some images make the model end its answer at the first token.
+                text = String(repeating: "<image>\n", count: images.count) + text
             } else { throw APIError("content must be a string or text/image_url parts") }
             imageCount += images.count
             parsed.append(Message(role: role, text: text, images: images))

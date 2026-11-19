@@ -37,6 +37,8 @@ final class ServerCoreTests: XCTestCase {
         XCTAssertEqual(request.messages.map(\.role), ["system", "user", "assistant", "user"])
         XCTAssertEqual(request.messages.flatMap(\.images).count, 2)
         XCTAssertTrue(request.messages[1].text.hasPrefix("<image>\n"))
+        // Images go before the text whatever the part order (the model's VQA format).
+        XCTAssertEqual(request.messages[3].text, "<image>\nCompare")
     }
     func testBadInputs400() {
         for value: Any in [[:], ["messages": []], ["messages": [["role": "tool", "content": "x"]]], ["messages": [["role": "user", "content": 4]]], ["messages": [["role": "user", "content": "<IMG_CONTEXT>"]]], ["messages": [["role": "user", "content": "x"]], "max_tokens": -1], ["messages": [["role": "user", "content": "x"]], "top_p": 0]] {
@@ -98,5 +100,26 @@ final class ServerCoreTests: XCTestCase {
         let config = try Configuration(arguments: ["--port", "8004"], env: ["SENSENOVA_PORT": "8005", "SENSENOVA_HOST": "127.0.0.1"])
         XCTAssertEqual(config.port, 8004); XCTAssertEqual(config.host, "127.0.0.1")
         XCTAssertThrowsError(try Configuration(arguments: ["--port", "0"], env: [:]))
+    }
+
+    func testEmptyAnswerCaptureKeepsRequestAndPrunes() throws {
+        let png = try fixture()
+        let uri = "data:image/png;base64," + png.base64EncodedString()
+        let request = try ChatRequest(data: jsonData(["messages": [
+            ["role": "user", "content": [["type": "text", "text": "Describe"], ["type": "image_url", "image_url": ["url": uri]]]]],
+            "temperature": 0, "max_tokens": 64]))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sn-empty-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let capture = EmptyAnswerCapture(directory: root.path, keep: 2)
+        let first = try capture.write(request, promptTokens: 12, imageTokens: [4], now: Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(try Data(contentsOf: first.appendingPathComponent("image-0.png")), png)
+        let summary = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: first.appendingPathComponent("request.json"))) as? [String: Any])
+        XCTAssertEqual(summary["prompt_tokens"] as? Int, 12); XCTAssertEqual(summary["max_tokens"] as? Int, 64)
+        let messages = try XCTUnwrap(summary["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["text"] as? String, "<image>\nDescribe")
+        XCTAssertEqual(messages.first?["images"] as? [String], ["image-0.png"])
+        try capture.write(request, promptTokens: 12, imageTokens: [4], now: Date(timeIntervalSince1970: 200))
+        try capture.write(request, promptTokens: 12, imageTokens: [4], now: Date(timeIntervalSince1970: 300))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).sorted(), ["200.000", "300.000"])
     }
 }
